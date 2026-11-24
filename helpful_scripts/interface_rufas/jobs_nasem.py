@@ -13,19 +13,20 @@ JOBS={}
 PROCESSES={}
 LOCK=threading.Lock()
 SLOTS=threading.Semaphore(1)
-JOB_TIMEOUT_SECONDS=600
+JOB_TIMEOUT_SECONDS={'planejamento':600,'acoplado':1800}
 
 
-def submit(scenario):
+def submit(scenario,modo='planejamento'):
     if not isinstance(scenario,dict):raise ValueError('Cenário inválido.')
+    if modo not in JOB_TIMEOUT_SECONDS:raise ValueError('Modo de simulação inválido.')
     with LOCK:
         if sum(j['estado'] in ('fila','executando') for j in JOBS.values())>=3:
             raise ValueError('Há três cenários na fila. Aguarde ou cancele um deles.')
         for key in list(JOBS):
             if JOBS[key]['estado'] not in ('fila','executando') and time.time()-JOBS[key]['criado']>3600:del JOBS[key]
         key=uuid.uuid4().hex
-        JOBS[key]={'estado':'fila','progresso':'Aguardando o motor local.','criado':time.time(),'atualizado':time.time()}
-    threading.Thread(target=run,args=(key,scenario),daemon=True).start()
+        JOBS[key]={'estado':'fila','modo':modo,'progresso':'Aguardando o motor local.','criado':time.time(),'atualizado':time.time()}
+    threading.Thread(target=run,args=(key,scenario,modo),daemon=True).start()
     return key
 
 
@@ -47,7 +48,7 @@ def cancel(key):
     return snapshot(key)
 
 
-def run(key,scenario):
+def run(key,scenario,modo='planejamento'):
     with SLOTS:
         with LOCK:
             if JOBS[key]['estado']=='cancelado':return
@@ -57,7 +58,7 @@ def run(key,scenario):
         proc=None;timer=None;timed_out=threading.Event()
         try:
             with tempfile.TemporaryFile(mode='w+t') as errors:
-                proc=subprocess.Popen([str(runtime),'-u',str(worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True,cwd=ROOT)
+                proc=subprocess.Popen([str(runtime),'-u',str(worker),modo],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True,cwd=ROOT)
                 with LOCK:
                     PROCESSES[key]=proc
                     cancelled=JOBS[key]['estado']=='cancelado'
@@ -66,7 +67,7 @@ def run(key,scenario):
                     timed_out.set()
                     try:proc.kill()
                     except ProcessLookupError:pass
-                timer=threading.Timer(JOB_TIMEOUT_SECONDS,stop_timeout);timer.daemon=True;timer.start()
+                timer=threading.Timer(JOB_TIMEOUT_SECONDS[modo],stop_timeout);timer.daemon=True;timer.start()
                 proc.stdin.write(json.dumps(scenario));proc.stdin.close()
                 result=None
                 for line in proc.stdout:
@@ -80,10 +81,10 @@ def run(key,scenario):
                     if JOBS[key]['estado']=='cancelado':return
                 if result is None:
                     errors.seek(0);detail=errors.read()[-1500:]
-                    result={'sucesso':False,'status':'limite_tempo' if timed_out.is_set() else 'falha_motor','mensagem':'Tempo máximo de 10 minutos atingido. Reduza o horizonte/intervalos.' if timed_out.is_set() else 'O motor foi interrompido. Confira o diagnóstico técnico.','detalhe_tecnico':detail}
+                    result={'sucesso':False,'status':'limite_tempo' if timed_out.is_set() else 'falha_motor','mensagem':f'Tempo máximo de {JOB_TIMEOUT_SECONDS[modo]//60} minutos atingido. Reduza o horizonte/intervalos.' if timed_out.is_set() else 'O motor foi interrompido. Confira o diagnóstico técnico.','detalhe_tecnico':detail}
             # Preserve failed diagnostics as well as validated plans, locally.
             folder=ROOT/'output/estudo_dieta';folder.mkdir(parents=True,exist_ok=True)
-            target=folder/f'rufas_{key}.json'
+            target=folder/f'{"acoplado" if modo=="acoplado" else "rufas"}_{key}.json'
             target.write_text(json.dumps({'cenario':scenario,**result},ensure_ascii=False,indent=2,allow_nan=False))
             result['arquivo']=str(target)
             with LOCK:

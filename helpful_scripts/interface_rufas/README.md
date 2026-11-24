@@ -14,6 +14,18 @@ independentes de referência, sem alterações. A rota antiga `/api/otimizar` ta
 permanece como referência NRC simplificada; a interface atual não a utiliza.
 Não confundir resultados anteriores com os da integração nativa v4.
 
+## Dois tipos de simulação
+
+A tela tem o seletor **Tipo de simulação**:
+
+| Modo | O que roda | De onde vem o leite |
+| --- | --- | --- |
+| Planejamento · vaca representativa | Só o otimizador (`rufas_solver.planejar`), para uma vaca descrita na tela, em blocos de N dias. | Meta digitada, fixa em todos os dias. |
+| Otimizador + simulação RuFaS · rebanho | A simulação completa do RuFaS (`rufas_acoplado.simular_acoplado`), com o otimizador chamado a cada reformulação. | Simulação do RuFaS (curva de lactação de cada vaca). |
+
+O modo de planejamento é o fluxo descrito no restante deste README. O modo
+acoplado está detalhado em [Modo acoplado](#modo-acoplado-otimizador-dentro-da-simulação-do-rufas).
+
 ## Rodar localmente
 
 Python 3.12 ou 3.13. Na raiz do clone:
@@ -123,10 +135,13 @@ componentes são rejeitados explicitamente. Sem declaração, Ca/P do premix sã
 - `abrir_interface.py`: API loopback e arquivos da interface. POST exige mesma origem.
 - `interface/app.js`: cenário, tabela de alimentos, fila, cancelamento e resultados.
 - `test_rufas.py`: integração com módulos e dados reais, dois padrões, horizonte, preços, estoques e exclusões.
+- `rufas_acoplado.py`: modo acoplado, com o otimizador chamado dentro da simulação do RuFaS.
+- `test_acoplado.py`: regressões do modo acoplado.
 
 GET `/api/rufas/perfil`; GET `/api/rufas/alimentos?padrao=NRC|NASEM`;
 POST `/api/rufas/jobs`; GET `/api/rufas/jobs/<id>`;
 POST `/api/rufas/jobs/<id>/cancel`.
+POST `/api/acoplado/jobs` (modo acoplado; acompanhamento pelas mesmas rotas de `/api/rufas/jobs/<id>`).
 
 Uma tarefa executa por vez, até três ativas/aguardando. Cancelamento encerra o
 worker. Fila em memória não é recuperada após reinício. Resultados e falhas vão
@@ -140,6 +155,121 @@ env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl .venv-rufas/bin/python -m unittest di
 A interface é um cliente local dos componentes científicos; `RUFAS/`, `input/`
 e os estudos originais não foram modificados. Documentação do motor anterior é
 histórica: o identificador atual é `rufas-nativo-holandesa-custo-v4`.
+
+## Modo acoplado: otimizador dentro da simulação do RuFaS
+
+Arquivo: `rufas_acoplado.py`. Identificador: `rufas-acoplado-simulacao-v1`.
+
+### Fluxo
+
+1. O RuFaS roda a simulação `animals_only` do exemplo
+   (`input/metadata/example_animals_only_metadata.json`): rebanho de 100 vacas da
+   população de exemplo, reprodução, curva de lactação, secagem, descarte e clima.
+2. O RuFaS reformula as rações no dia 1 e depois a cada `intervalo_dieta` dias
+   (`formulation_interval`). Nesses dias, a baia de vacas em lactação não usa a
+   formulação nativa: recebe a dieta de custo mínimo do otimizador da interface.
+3. O otimizador usa as exigências **médias das vacas que estão na baia naquele dia**.
+   Elas são calculadas vaca a vaca, com peso, DEL, gestação, ordem de parto e leite
+   gerados pela simulação, e recalculadas para a FDN/energia de cada dieta testada,
+   como no modo de planejamento.
+4. A dieta vira a ração da baia no RuFaS (`pen.ration`, kg MS/vaca/dia), e a
+   simulação segue com ela até a próxima reformulação. As outras baias (bezerras,
+   novilhas e pré-parto) continuam com a formulação nativa.
+5. Ao fim do horizonte, o resultado traz as reformulações, a simulação diária e o
+   resumo.
+
+O acoplamento é feito por dois ganchos instalados só durante a rodada, em
+`HerdManager._reformulate_ration_single_pen` (formulação da baia de lactação) e
+`HerdManager.execute_daily_routines` (registro diário). Depois da rodada, os
+métodos originais são restaurados. Nenhum arquivo de `RUFAS/` ou de `input/` é
+alterado: as entradas da rodada são cópias gravadas em
+`output/acoplado/<rodada>/entradas/`, com o horizonte, o padrão, o intervalo e a
+lista de alimentos da baia de lactação.
+
+### Regras
+
+- **Leite:** é o da simulação. No RuFaS, a dieta não aumenta a produção. No dia 1,
+  o leite ainda não foi calculado pela simulação; por isso, cada vaca usa a curva
+  de Wood dela mesma.
+- **Sem dieta viável:** segue a regra do RuFaS. O leite de cada vaca é cortado em
+  0,25 kg e o otimizador tenta de novo, até o máximo configurado (0,5 kg) ou até a
+  média da baia ficar abaixo de 15 kg. Se ainda assim não houver dieta, a dieta
+  anterior é mantida; na primeira reformulação, a rodada para com a mensagem do
+  otimizador.
+- **Custo do dia:** custo da dieta por vaca (com o premix) × vacas na baia de
+  lactação naquele dia.
+- **Conferência diária:** todos os dias, a dieta em uso é comparada com a
+  exigência média das vacas que estão na baia naquele dia. Como as vacas e o leite
+  mudam de um dia para o outro, aparecem faltas pequenas entre as reformulações; a
+  tabela mostra cada falta na unidade da restrição.
+- **NRC:** as rações de exemplo das outras baias usam duas misturas que só
+  existem na biblioteca NASEM. Na cópia de entrada, a mistura mineral (301) vira
+  calcário + fosfato bicálcico e a mistura de subprodutos (302) vira farelo de
+  soja + casca de soja, em partes iguais.
+
+### Entradas
+
+| Campo | Padrão | Descrição |
+| --- | --- | --- |
+| `padrao` | `NASEM` | `NASEM` ou `NRC`. |
+| `dias_simulacao` | 90 | Dias simulados, de 1 a 730, a partir de 01/01/2013 (o clima de exemplo cobre 2013–2019). |
+| `intervalo_dieta` | 30 | De quantos em quantos dias o RuFaS reformula e chama o otimizador (1 a 60). |
+| `preco_leite_kg` | 2,75 | R$/kg, só para a receita e a margem. |
+| `teto_caroco` | 2,53 | kg MS/vaca/dia de caroço de algodão; `null` = sem teto; 0 = exclui. |
+| `orcamento_dia` | `null` | Teto de custo da dieta, R$/vaca/dia. |
+| `precos_custom` | `{}` | Preço por alimento, R$/kg natural. |
+| `alimentos_bloqueados` | `[]` | Códigos RuFaS dos alimentos que a baia de lactação não pode receber. |
+| `premix_composicao` | `{}` | Ca e P do premix, g/kg MS. |
+| `semente` | 42 | Semente aleatória do RuFaS (variação diária do leite, reprodução). |
+| `conferencia_diaria` | `true` | Confere a dieta em uso todos os dias. |
+
+Não se aplicam neste modo: dados da vaca (vêm do rebanho), vacas em lactação e
+total de animais (vêm da simulação), data inicial, temperatura (vem do clima) e
+estoques.
+
+### Saídas
+
+- `reformulacoes`: em cada reformulação, dia, vacas na baia, leite médio, corte de
+  leite, DEL e peso médios, dieta, custo por vaca, restrições e tentativas.
+- `diario`: em cada dia, vacas em lactação, leite do rebanho, leite médio, DEL
+  médio, custo do dia e conferência da dieta.
+- `resumo`: leite total, custo total, receita, margem, custo por kg de leite,
+  médias e contagens.
+
+### Como rodar
+
+Na interface, escolha **Otimizador + simulação RuFaS · rebanho** e clique em
+**Rodar simulação com otimizador**. Pela API: POST `/api/acoplado/jobs` com o
+cenário acima; acompanhar e cancelar pelas mesmas rotas
+`/api/rufas/jobs/<id>` e `/api/rufas/jobs/<id>/cancel`. Limite de 30 minutos por
+tarefa. O resultado também é gravado em `output/estudo_dieta/acoplado_<id>.json`.
+
+Pela linha de comando, na raiz do clone:
+
+```bash
+env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl .venv-rufas/bin/python helpful_scripts/interface_rufas/rufas_acoplado.py --padrao NASEM --dias 365 --intervalo 30
+```
+
+Tempo de referência: 365 dias com reformulação a cada 15 dias, cerca de 20 s.
+
+Testes:
+
+```bash
+cd helpful_scripts/interface_rufas
+env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl ../../.venv-rufas/bin/python -m unittest test_acoplado -v
+```
+
+### Limitações
+
+- Rebanho, manejo e clima são os do exemplo do RuFaS (fazenda americana); preços e
+  alimentos da baia de lactação são os de Goiás usados na interface.
+- Só a baia de lactação é otimizada. A dieta vale para a vaca média da baia, não
+  para cada vaca.
+- O premix fixo entra no custo e no otimizador, mas não é passado ao RuFaS, porque
+  não tem código na biblioteca de alimentos.
+- Estoques não são controlados neste modo.
+- Os tetos operacionais (PB 19%, Ca 1%, P 0,42%) e o adaptador NASEM para vaca
+  não gestante são os mesmos do modo de planejamento.
 
 ## Correção v4.1: não gestante antes de DEL 100
 

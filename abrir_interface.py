@@ -67,7 +67,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == '/api/nasem/alimentos':
             self.send_json(200,json.loads((ROOT/'helpful_scripts/interface_rufas/alimentos_nasem.json').read_text()))
             return
-        if self.path.startswith(('/api/nasem/jobs/','/api/rufas/jobs/')):
+        if self.path.startswith(('/api/nasem/jobs/','/api/rufas/jobs/','/api/acoplado/jobs/')):
             job = snapshot(self.path.rsplit('/',1)[-1])
             self.send_json(200 if job else 404, job or {'mensagem':'Cálculo não encontrado.'})
             return
@@ -90,12 +90,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not 0 < size <= 100000:
                 raise ValueError("Tamanho de solicitação inválido.")
             body = json.loads(self.rfile.read(size))
-            if self.path.startswith(('/api/nasem/jobs/','/api/rufas/jobs/')) and self.path.endswith('/cancel'):
+            if self.path.startswith(('/api/nasem/jobs/','/api/rufas/jobs/','/api/acoplado/jobs/')) and self.path.endswith('/cancel'):
                 job=cancel(self.path.split('/')[-2])
                 self.send_json(200 if job else 404,job or {'mensagem':'Cálculo não encontrado.'})
                 return
-            if self.path in ('/api/nasem/jobs','/api/rufas/jobs'):
-                key=submit(body)
+            if self.path in ('/api/nasem/jobs','/api/rufas/jobs','/api/acoplado/jobs'):
+                key=submit(body,'acoplado' if self.path=='/api/acoplado/jobs' else 'planejamento')
                 self.send_json(202, {'job_id':key})
                 return
             if self.path not in ("/api/otimizar", "/api/exportar"):

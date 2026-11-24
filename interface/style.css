@@ -6,3 +6,4 @@ body:not(.nrc) .nrc-only{display:none}
 
 .stock-help{display:block;max-width:180px;font-size:11px;color:var(--muted);margin-top:4px}#diagnostic{padding:18px;background:#f1e7dc;border-left:3px solid #9d633d;margin:18px 0}#diagnostic h2{margin:0 0 8px}#diagnostic li{margin-bottom:7px}#cancel{border-color:#9d633d;color:#7c4b2c}input[type=text]{width:110px;padding:7px;border:1px solid #bfc9bf;background:#fffef9;color:var(--ink);font:inherit}button:disabled{cursor:default}
 .layout>aside,.layout>section,.pair>*{min-width:0}input,select,textarea{min-width:0;max-width:100%}@media(max-width:800px){.layout{grid-template-columns:minmax(0,1fr)}}
+.label-text{float:none!important;color:inherit!important;font-weight:inherit!important}.only-coupled{display:none}body.coupled .only-coupled{display:block}body.coupled span.only-coupled{display:inline}body.coupled .only-plan{display:none!important}
