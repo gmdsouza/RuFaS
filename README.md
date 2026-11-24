@@ -8,9 +8,10 @@
 >   - [`helpful_scripts/nrc2001_dieta_lp/`](helpful_scripts/nrc2001_dieta_lp/): exigências do NRC (2001);
 >   - [`helpful_scripts/nasem2021_dieta_lp/`](helpful_scripts/nasem2021_dieta_lp/): exigências do NASEM (2021),
 >     escrito com PuLP.
-> - **O que mudou:** apenas essas pastas novas e esta nota. Nenhum código, dado ou parâmetro do RuFaS foi alterado.
+> - **Camada local adicional:** interface offline em `interface/`, servidor `abrir_interface.py` e planejamento de produção em `helpful_scripts/interface_rufas/`, com motor NASEM independente e ambiente isolado. Consulte o README dessa camada para instalação, hipóteses e limitações. O núcleo e as entradas do RuFaS são preservados.
 > - **Comparabilidade:** as simulações do RuFaS dão os mesmos resultados do original. Os modelos de dieta são
 >   independentes e não substituem a formulação de rações do RuFaS.
+> - **Objetivo da interface:** formular a dieta de custo mínimo para uma produção de leite informada, nos padrões NRC e NASEM. O leite é parâmetro; somente as quantidades dos alimentos são otimizadas. Horizonte e rebanho definem o planejamento e os totais.
 > - Este fork não é uma versão oficial nem endossada pelo projeto RuFaS. Assim como o original, é distribuído
 >   sob a licença GPLv3.
 
