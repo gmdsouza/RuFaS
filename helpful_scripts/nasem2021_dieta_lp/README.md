@@ -20,8 +20,9 @@ O código está em um arquivo só, [`dieta_pulp.py`](dieta_pulp.py), escrito de 
 7. [Resultado](#7-resultado)
 8. [Limitações](#8-limitações)
 9. [Uso da dieta no RuFaS](#9-uso-da-dieta-no-rufas)
-10. [Glossário](#10-glossário)
-11. [Referências](#11-referências)
+10. [Versão em funções e uso dentro da simulação](#10-versão-em-funções-e-uso-dentro-da-simulação)
+11. [Glossário](#11-glossário)
+12. [Referências](#12-referências)
 
 ---
 
@@ -468,7 +469,48 @@ Cuidados:
 
 ---
 
-## 10. Glossário
+## 10. Versão em funções e uso dentro da simulação
+
+`modelo_pulp.py` tem o mesmo modelo em forma de funções, para outros programas chamarem. `dieta_pulp.py` continua
+igual: é o script de leitura de cima para baixo.
+
+| Função | Bloco do script | O que faz |
+| --- | --- | --- |
+| `exigencias(vaca)` | 2 | Exigências de uma vaca (`Vaca`: peso, peso adulto, DEL, gestação, leite e composição, ganho, reservas, escore, multípara). |
+| `exigencias_media(vacas)` | — | Média das exigências de várias vacas (uma baia), como o RuFaS faz. |
+| `carregar_alimentos(precos_custom, bloqueados)` | 3 | Alimentos e preços; aceita preço próprio (R$/kg natural) e alimentos bloqueados. |
+| `formular(req, F, preco_premix, ims, tetos, orcamento)` | 4 | Rodadas de LP até a dieta suposta e a medida coincidirem. `ims` = (consumo mínimo, máximo); `tetos` = kg MS máximos por alimento; `orcamento` = teto de custo. |
+| `avaliar(req, F, kg, ims, preco_premix)` | 4 (sem resolver) | Confere uma dieta fixa: mede a dieta (energia e proteína microbiana dela mesma) e calcula a folga de cada restrição. |
+
+As restrições são escritas uma vez só (`_restricoes`), com os mesmos nomes do script, e usadas tanto para resolver
+quanto para conferir.
+
+Diferenças em relação ao script, todas para aceitar outras vacas:
+
+- vaca vazia (`gestacao=None`): sem os termos de útero e de gestação;
+- primípara (`multipara=False`): coeficientes de primípara na Eq. 2-1;
+- faixa de consumo como parâmetro: no script, ela vai do consumo da Eq. 2-1 ao da Tabela 21-1.
+
+`test_modelo_pulp.py` confere que `formular(exigencias(TABELA_21_1), ...)`, com a faixa de consumo do script,
+dá as mesmas exigências, a mesma dieta, o mesmo custo (R$ 40,35), o mesmo número de rodadas e as mesmas restrições
+no limite que `dieta_pulp.py`, e que `avaliar` da dieta formulada devolve as mesmas folgas.
+
+```bash
+cd helpful_scripts/nasem2021_dieta_lp
+python -m unittest test_modelo_pulp -v
+```
+
+**Dentro da simulação do RuFaS:** no modo acoplado da interface (`helpful_scripts/interface_rufas/rufas_acoplado.py`),
+o otimizador `pulp` usa estas funções. A cada reformulação do RuFaS, cada vaca da baia de lactação vira uma `Vaca`
+com os dados da simulação (peso, peso adulto, DEL, gestação, leite do dia, ordem de parto, escore; ganho-alvo e
+variação de reservas pelas fórmulas de crescimento do RuFaS, com perda de reservas como zero). A dieta é formulada
+para a média das exigências, com consumo entre ±30% do previsto pela Eq. 2-1 (a mesma faixa do RuFaS), e vira a
+ração da baia. Todos os dias, `avaliar` confere a dieta em uso contra as vacas daquele dia. Detalhes no README da
+interface.
+
+---
+
+## 11. Glossário
 
 | Sigla | Nome | O que é |
 |---|---|---|
@@ -493,7 +535,7 @@ FDN = NDF.
 
 ---
 
-## 11. Referências
+## 12. Referências
 
 - NASEM (National Academies of Sciences, Engineering, and Medicine). *Nutrient Requirements of Dairy Cattle*,
   8ª ed. Washington, DC: The National Academies Press, 2021. Versão traduzida: *Exigências Nutricionais de

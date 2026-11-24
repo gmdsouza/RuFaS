@@ -18,6 +18,7 @@ class CoupledSimulationTests(unittest.TestCase):
     def test_runs_whole_horizon_and_reformulates_on_rufas_schedule(self):
         r = self.result
         self.assertTrue(r['sucesso'], r.get('mensagem'))
+        self.assertEqual(r['otimizador'], 'pulp')
         self.assertEqual([d['dia'] for d in r['diario']], list(range(1, 21)))
         self.assertEqual([e['dia'] for e in r['reformulacoes']], [1, 11])
         self.assertTrue(all(e['sucesso'] for e in r['reformulacoes']))
@@ -52,9 +53,28 @@ class CoupledSimulationTests(unittest.TestCase):
         self.assertEqual(r['status'], 'sem_dieta_inicial')
         self.assertGreater(len(r['reformulacoes'][0]['tentativas']), 1)
 
+    def test_pulp_diet_comes_from_modelo_pulp_and_is_checked_daily_with_it(self):
+        first = self.result['reformulacoes'][0]
+        codes = {c['codigo'] for c in first['restricoes']}
+        self.assertTrue({'energia', 'pm', 'amido_max', 'fdn_mais_2fdnf', 'sulfur_min'} <= codes)
+        self.assertIn('Premix (fixo)', [i['nome'] for i in first['dieta']])
+        self.assertTrue(all(d['conferencia'] is not None for d in self.result['diario']))
+
+    def test_slsqp_engine_still_available(self):
+        r = simular_acoplado({'dias_simulacao': 6, 'intervalo_dieta': 3, 'otimizador': 'slsqp'})
+        self.assertTrue(r['sucesso'], r.get('mensagem'))
+        self.assertEqual([e['dia'] for e in r['reformulacoes']], [1, 4])
+        self.assertTrue(all(c['atendida'] for e in r['reformulacoes'] for c in e['restricoes']))
+
+    def test_default_optimizer_by_standard(self):
+        self.assertEqual(validar({})['otimizador'], 'pulp')
+        self.assertEqual(validar({'padrao': 'NRC'})['otimizador'], 'slsqp')
+        with self.assertRaises(ValueError):
+            validar({'padrao': 'NRC', 'otimizador': 'pulp'})
+
     def test_validation(self):
         for bad in ({'intervalo_dieta': 40, 'dias_simulacao': 30}, {'dias_simulacao': 731}, {'leite_kg': 40},
-                    {'padrao': 'CNCPS'}):
+                    {'padrao': 'CNCPS'}, {'otimizador': 'cplex'}, {'faixa_consumo': 1.5}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 validar(bad)
 

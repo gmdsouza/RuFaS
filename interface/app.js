@@ -32,7 +32,8 @@ function coupledScenario(){
   if(!/^\d+$/.test(seed))throw Error('Semente aleatória: informe um inteiro não negativo.');
   return {padrao:full.padrao,dias_simulacao:full.dias_simulacao,intervalo_dieta:full.intervalo_dieta,
     preco_leite_kg:full.preco_leite_kg,teto_caroco:optional(full.teto_caroco),orcamento_dia:optional(full.orcamento_dia),
-    precos_custom:full.precos_custom,alimentos_bloqueados:full.alimentos_bloqueados,premix_composicao:full.premix_composicao,semente:Number(seed)};
+    precos_custom:full.precos_custom,alimentos_bloqueados:full.alimentos_bloqueados,premix_composicao:full.premix_composicao,semente:Number(seed),
+    otimizador:$('optimizer').value};
 }
 async function request(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.mensagem||'Falha na solicitação.');return d;}
 function renderDiet(data){
@@ -71,7 +72,7 @@ function renderCoupled(data){
   coupled=data;$('coupled').hidden=false;$('coupled').classList.remove('stale');
   const r=data.resumo;
   $('c-milk').textContent=fmt(r.leite_total_kg,0)+' kg';$('c-cost').textContent=money(r.custo_total);$('c-margin').textContent=money(r.margem_total);
-  $('c-summary').textContent=r.dias_simulados+' dias simulados a partir de '+data.inicio+' · '+fmt(r.media_vacas_lactacao,1)+' vacas em lactação em média · '+
+  $('c-summary').textContent=r.otimizador+' · '+r.dias_simulados+' dias simulados a partir de '+data.inicio+' · '+fmt(r.media_vacas_lactacao,1)+' vacas em lactação em média · '+
     fmt(r.media_leite_vaca,1)+' kg/vaca/dia · '+money(r.custo_por_kg_leite||0)+'/kg de leite · '+r.reformulacoes+' reformulações · '+data.padrao+
     (r.dias_conferidos?' · '+r.dias_exigencia_nao_atendida+' de '+r.dias_conferidos+' dias com alguma exigência média não atendida':'');
   $('c-events').replaceChildren();$('c-daily').replaceChildren();
@@ -137,6 +138,10 @@ form.addEventListener('submit',async e=>{
 function download(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('download-plan').addEventListener('click',()=>{if(!dirty&&plan)download(plan,'planejamento-rufas-'+plan.padrao.toLowerCase()+'.json');});
 $('download-coupled').addEventListener('click',()=>{if(!dirty&&coupled)download(coupled,'simulacao-acoplada-rufas-'+coupled.padrao.toLowerCase()+'.json');});
+function syncOptimizer(){
+  const nrc=$('standard').value==='NRC',pulp=$('optimizer').querySelector('[value=pulp]');
+  pulp.disabled=nrc;if(nrc)$('optimizer').value='slsqp';
+}
 function applySimMode(){
   const on=coupledMode();document.body.classList.toggle('coupled',on);
   form.elements.dias_simulacao.max=on?730:304;form.elements.intervalo_dieta.max=on?60:30;
@@ -149,7 +154,7 @@ function applyProfile(){
   form.elements.data_inicio.value=new Date().toLocaleDateString('sv-SE');
   $('animal-profile').textContent=profile.nome+' · HO · animal '+profile.animal_id+' · fonte: '+profile.fonte;
 }
-$('reset').addEventListener('click',()=>{form.reset();applyProfile();applySimMode();setMode();});
+$('reset').addEventListener('click',()=>{form.reset();applyProfile();applySimMode();syncOptimizer();setMode();});
 async function loadFoods(){
   const r=await fetch('/api/rufas/alimentos?padrao='+encodeURIComponent($('standard').value));if(!r.ok)throw Error('Biblioteca RuFaS indisponível');
   const data=await r.json();$('foods').replaceChildren();
@@ -167,8 +172,8 @@ async function setMode(){
   try{await loadFoods();$('connection').textContent='RuFaS nativo · NRC / NASEM · local';message('');}
   catch(e){message(e.message,true);}finally{loading=false;setBusy(false);}
 }
-$('standard').addEventListener('change',setMode);
+$('standard').addEventListener('change',()=>{syncOptimizer();setMode();});
 (async()=>{
-  try{const r=await fetch('/api/rufas/perfil');if(!r.ok)throw Error('Perfil RuFaS indisponível');profile=await r.json();applyProfile();applySimMode();await setMode();}
+  try{const r=await fetch('/api/rufas/perfil');if(!r.ok)throw Error('Perfil RuFaS indisponível');profile=await r.json();applyProfile();applySimMode();syncOptimizer();await setMode();}
   catch(e){message(e.message,true);$('solve').disabled=true;}
 })();

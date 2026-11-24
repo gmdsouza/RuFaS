@@ -13,7 +13,9 @@
 > - **Dois tipos de simulação na interface:** planejamento para uma vaca representativa, sem simulação, e
 >   otimizador acoplado à simulação completa do RuFaS (`helpful_scripts/interface_rufas/rufas_acoplado.py`). No modo
 >   acoplado, o RuFaS simula o rebanho de exemplo e, no dia 1 e a cada intervalo de reformulação, a baia de lactação
->   recebe a dieta de custo mínimo calculada para as vacas que estão nela; o leite vem da simulação.
+>   recebe a dieta de custo mínimo calculada para as vacas que estão nela; o leite vem da simulação. O otimizador pode ser
+>   o modelo PuLP do NASEM (`helpful_scripts/nasem2021_dieta_lp/modelo_pulp.py`, as mesmas equações de `dieta_pulp.py`)
+>   ou o SciPy/SLSQP com as restrições nativas do RuFaS.
 > - **Objetivo da interface:** formular a dieta de custo mínimo para uma produção de leite informada, nos padrões NRC e NASEM. No planejamento, o leite é parâmetro; no modo acoplado, vem da simulação. Somente as quantidades dos alimentos são otimizadas. Horizonte e rebanho definem o planejamento e os totais.
 > - Este fork não é uma versão oficial nem endossada pelo projeto RuFaS. Assim como o original, é distribuído
 >   sob a licença GPLv3.

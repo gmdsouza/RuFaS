@@ -5,12 +5,17 @@ Fluxo
 1. O RuFaS simula o rebanho de exemplo dia a dia (modo ``animals_only``).
 2. No dia 1 e a cada ``intervalo_dieta`` dias, no ponto em que o próprio RuFaS
    reformula as rações, a baia de vacas em lactação recebe a dieta de custo
-   mínimo do otimizador da interface (``rufas_solver.Formulator``). As
-   exigências usadas são a média das exigências nativas das vacas que estão na
-   baia naquele dia, calculadas vaca a vaca com o leite, o DEL, a gestação e o
-   peso que a simulação gerou.
-3. A simulação segue com essa dieta até a próxima reformulação. As outras baias
-   (bezerras, novilhas e pré-parto) seguem o fluxo nativo do RuFaS.
+   mínimo de um dos dois otimizadores, calculada para as vacas que estão na baia
+   naquele dia (leite, DEL, gestação e peso gerados pela simulação):
+   - ``pulp``: o modelo NASEM próprio, escrito com PuLP
+     (``helpful_scripts/nasem2021_dieta_lp/modelo_pulp.py``, mesmas equações de
+     ``dieta_pulp.py``), com a média das exigências das vacas da baia;
+   - ``slsqp``: o otimizador da interface (``rufas_solver.Formulator``), com as
+     exigências nativas do RuFaS e as restrições do ``RationOptimizer``.
+3. A simulação segue com essa dieta até a próxima reformulação. Todos os dias, a
+   dieta em uso é conferida contra as exigências das vacas daquele dia, com as
+   restrições do próprio otimizador. As outras baias (bezerras, novilhas e
+   pré-parto) seguem o fluxo nativo do RuFaS.
 
 O leite é resultado da simulação (curva de lactação do RuFaS), não uma meta
 digitada. Nenhum arquivo do núcleo ``RUFAS/`` nem de ``input/`` é alterado: as
@@ -36,6 +41,7 @@ except ImportError:
 # rufas_solver coloca a raiz do clone no sys.path; só depois o pacote RUFAS pode ser importado.
 from RUFAS.biophysical.animal.animal_module_constants import AnimalModuleConstants  # noqa: E402
 from RUFAS.biophysical.animal.data_types.animal_combination import AnimalCombination  # noqa: E402
+from RUFAS.biophysical.animal.data_types.growth import GrowthInputs  # noqa: E402
 from RUFAS.biophysical.animal.data_types.nutrition_data_structures import NutritionEvaluationResults  # noqa: E402
 from RUFAS.biophysical.animal.herd_manager import HerdManager  # noqa: E402
 from RUFAS.biophysical.animal.milk.milk_production import MilkProduction  # noqa: E402
@@ -43,6 +49,11 @@ from RUFAS.biophysical.animal.nutrients.nutrition_evaluator import NutritionEval
 from RUFAS.data_structures.feed_storage_to_animal_connection import NutrientStandard  # noqa: E402
 
 ROOT = solver.ROOT
+sys.path.insert(0, str(ROOT / 'helpful_scripts' / 'nasem2021_dieta_lp'))
+import modelo_pulp  # noqa: E402
+
+OTIMIZADORES = {'pulp': 'PuLP/CBC · modelo NASEM próprio (modelo_pulp)',
+                'slsqp': 'SciPy/SLSQP · restrições nativas do RuFaS'}
 
 MODEL = 'rufas-acoplado-simulacao-v1'
 METADATA = 'input/metadata/example_animals_only_metadata.json'
@@ -65,7 +76,8 @@ def validar(scenario):
         raise ValueError('Cenário deve ser um objeto.')
     defaults = dict(padrao='NASEM', dias_simulacao=90, intervalo_dieta=30, preco_leite_kg=2.75,
                     teto_caroco=2.53, orcamento_dia=None, precos_custom={}, alimentos_bloqueados=[],
-                    premix_composicao={}, semente=42, conferencia_diaria=True)
+                    premix_composicao={}, semente=42, conferencia_diaria=True, otimizador=None,
+                    faixa_consumo=AnimalModuleConstants.DMI_CONSTRAINT_FRACTION)
     unknown = set(scenario) - set(defaults)
     if unknown:
         raise ValueError('Parâmetros desconhecidos no modo acoplado: ' + ', '.join(sorted(unknown)))
@@ -83,6 +95,19 @@ def validar(scenario):
     if not math.isfinite(s['preco_leite_kg']) or not 0 <= s['preco_leite_kg'] <= 30:
         raise ValueError('preco_leite_kg: fora do domínio 0–30.')
     s['conferencia_diaria'] = bool(s['conferencia_diaria'])
+    return _validar_otimizador(s)
+
+
+def _validar_otimizador(s):
+    if s['otimizador'] is None:
+        s['otimizador'] = 'pulp' if s['padrao'] == 'NASEM' else 'slsqp'
+    if s['otimizador'] not in OTIMIZADORES:
+        raise ValueError('otimizador: use "pulp" ou "slsqp".')
+    if s['otimizador'] == 'pulp' and s['padrao'] != 'NASEM':
+        raise ValueError('O modelo PuLP usa as equações do NASEM; para o NRC, use o otimizador SLSQP.')
+    s['faixa_consumo'] = float(s['faixa_consumo'])
+    if not 0 < s['faixa_consumo'] < 1:
+        raise ValueError('faixa_consumo: use uma fração entre 0 e 1 (0,30 = ±30% do consumo previsto).')
     return s
 
 
@@ -112,6 +137,25 @@ def _cenario_baia(s, cows, temperature):
                 premix_composicao=s['premix_composicao'])
 
 
+def _crescimento(animal):
+    """Ganho de peso-alvo e variação de reservas do dia, pelas fórmulas de crescimento do próprio RuFaS.
+
+    O ganho diário que o RuFaS guarda soma o ganho-alvo, o crescimento do feto e a variação de
+    reservas; o modelo PuLP trata o feto à parte. No dia 1 esse valor ainda é zero. Por isso as
+    duas parcelas são calculadas aqui, com as mesmas entradas que a vaca usa na rotina diária.
+    """
+    inputs = GrowthInputs(days_in_pregnancy=animal.days_in_pregnancy, animal_type=animal.animal_type,
+                          body_weight=animal.body_weight, mature_body_weight=animal.mature_body_weight,
+                          birth_weight=animal.birth_weight, days_born=animal.days_born,
+                          days_in_milk=animal.days_in_milk, conceptus_weight=animal.conceptus_weight,
+                          gestation_length=animal.gestation_length, calf_birth_weight=animal.calf_birth_weight,
+                          calves=animal.calves, calving_interval=animal.calving_interval)
+    growth = animal.growth
+    target = growth._calculate_cow_target_daily_growth(inputs)
+    tissue, _ = growth._calculate_cow_body_weight_tissue_change(inputs)
+    return float(target), float(tissue)
+
+
 def _vacas(pen):
     """Estado de cada vaca da baia, como a própria simulação o usa nas exigências."""
     cows = []
@@ -124,8 +168,10 @@ def _vacas(pen):
             mp = animal.milk_production
             milk = max(0., MilkProduction.calculate_daily_milk_production(
                 max(animal.days_in_milk, 1), mp.wood_l, mp.wood_m, mp.wood_n) - mp.milk_production_reduction)
+        target, tissue = _crescimento(animal)
         cows.append(dict(
-            id=animal.id, peso=animal.body_weight, peso_adulto=animal.mature_body_weight,
+            ganho_alvo=target, reservas=tissue, id=animal.id, peso=animal.body_weight,
+            peso_adulto=animal.mature_body_weight,
             gest=animal.days_in_pregnancy if animal.is_pregnant else None,
             del_=animal.days_in_milk if milking else None, del_ref=animal.days_in_milk if milking else 0,
             escore=animal.body_condition_score_5, ganho=animal.growth.daily_growth,
@@ -256,6 +302,71 @@ def preparar_entradas(s, folder, feed_ids, prices):
     return folder / 'task_manager_metadata.json'
 
 
+class MotorSLSQP:
+    """Otimizador da interface: exigências e restrições nativas do RuFaS, resolvido com SciPy/SLSQP."""
+
+    def __init__(self, s):
+        self.s = s
+        base = solver.Formulator(dict(padrao=s['padrao'], teto_caroco=s['teto_caroco'],
+                                      precos_custom=s['precos_custom'], alimentos_bloqueados=s['alimentos_bloqueados'],
+                                      premix_composicao=s['premix_composicao']))
+        self.feed_ids = [r['id'] for r in base.records]
+        self.precos = {r['id']: f.purchase_cost for r, f in zip(base.records, base.feeds)}
+
+    def _formulator(self, cows, temperature, housing):
+        return PenFormulator(_cenario_baia(self.s, cows, temperature), cows, temperature, housing)
+
+    def formular(self, cows, temperature, housing, previous):
+        result, x = self._formulator(cows, temperature, housing).solve(0, span=1, initial=previous)
+        if not result['sucesso']:
+            return result, None
+        return dict(sucesso=True, ingredientes=result['ingredientes'], custo_total_dia=result['custo_total_dia'],
+                    consumo_total_ms=result['consumo_total_ms'], restricoes=result['restricoes'],
+                    exigencias=result['diagnosticos']['exigencias'], iteracoes=result['iteracoes'],
+                    tempo_segundos=result['tempo_segundos']), x
+
+    def conferir(self, cows, temperature, housing, x):
+        _, checks, _, _, _ = self._formulator(cows, temperature, housing).evaluate(x, 0)
+        return checks
+
+
+class MotorPuLP:
+    """Modelo NASEM próprio (modelo_pulp.py), com a média das exigências das vacas da baia."""
+
+    def __init__(self, s):
+        self.s = s
+        self.F, self.preco_premix = modelo_pulp.carregar_alimentos(s['precos_custom'], s['alimentos_bloqueados'])
+        if len(self.F) < 2:
+            raise ValueError('Selecione pelo menos dois alimentos.')
+        self.feed_ids = [int(i) for i in self.F.id_biblioteca]
+        self.precos = dict(zip(self.feed_ids, map(float, self.F.preco)))
+        self.tetos = {58: s['teto_caroco']} if s['teto_caroco'] is not None else {}
+
+    def exigencias(self, cows):
+        vacas = [modelo_pulp.Vaca(pv=c['peso'], pc_mat=c['peso_adulto'], del_=c['del_ref'], gestacao=c['gest'],
+                                  leite=c['leite'], gordura=MilkProduction.fat_percent,
+                                  proteina=MilkProduction.true_protein_percent, lactose=MilkProduction.lactose_percent,
+                                  ganho=max(c['ganho_alvo'], 0.), reservas=max(c['reservas'], 0.), ecc=c['escore'],
+                                  multipara=c['paridade'] >= 2) for c in cows]
+        req = modelo_pulp.exigencias_media(vacas)
+        f = self.s['faixa_consumo']
+        return req, (req['IMS_EQ'] * (1 - f), req['IMS_EQ'] * (1 + f))
+
+    def formular(self, cows, temperature, housing, previous):
+        req, ims = self.exigencias(cows)
+        r = modelo_pulp.formular(req, self.F, self.preco_premix, ims, self.tetos, self.s['orcamento_dia'])
+        if not r['sucesso']:
+            return r, None
+        return dict(sucesso=True, ingredientes=r['ingredientes'], custo_total_dia=r['custo_total_dia'],
+                    consumo_total_ms=r['consumo_total_ms'], restricoes=r['restricoes'],
+                    exigencias=dict(r['exigencias'], consumo_min=ims[0], consumo_max=ims[1]),
+                    iteracoes=r['rodadas'], tempo_segundos=r['tempo_segundos']), r['kg']
+
+    def conferir(self, cows, temperature, housing, kg):
+        req, ims = self.exigencias(cows)
+        return modelo_pulp.avaliar(req, self.F, kg, ims, self.preco_premix, self.s['orcamento_dia'])
+
+
 class Acoplamento:
     """Estado da rodada e os dois ganchos instalados no HerdManager do RuFaS."""
 
@@ -264,15 +375,12 @@ class Acoplamento:
         self.progress = progress
         self.reformulacoes = []
         self.diario = []
-        self.dietas = {}      # pen id -> dieta em uso: vetor do otimizador, ração RuFaS e custo R$/vaca/dia
+        self.dietas = {}      # pen id -> dieta em uso: estado do otimizador, ração RuFaS e custo R$/vaca/dia
         self.erro = None
         self.inicio = time.monotonic()
-        self.base = solver.Formulator(dict(padrao=s['padrao'], teto_caroco=s['teto_caroco'],
-                                           precos_custom=s['precos_custom'],
-                                           alimentos_bloqueados=s['alimentos_bloqueados'],
-                                           premix_composicao=s['premix_composicao']))
-        self.feed_ids = [r['id'] for r in self.base.records]
-        self.precos = {r['id']: f.purchase_cost for r, f in zip(self.base.records, self.base.feeds)}
+        self.motor = MotorPuLP(s) if s['otimizador'] == 'pulp' else MotorSLSQP(s)
+        self.feed_ids = self.motor.feed_ids
+        self.precos = self.motor.precos
 
     def notify(self, message):
         if self.progress:
@@ -286,11 +394,11 @@ class Acoplamento:
         result = x = None
         while True:
             cows = _vacas(pen)
-            formulator = PenFormulator(_cenario_baia(self.s, cows, temperature), cows, temperature, pen.housing_type)
             milk = sum(c['leite'] for c in cows) / len(cows)
             self.notify(f'Dia {simulation_day + 1}: otimizando a dieta da baia {pen.id} ({len(cows)} vacas, '
-                        f'leite médio {milk:.1f} kg).')
-            result, x = formulator.solve(0, span=1, initial=None if previous is None else previous['x'])
+                        f'leite médio {milk:.1f} kg, {self.s["otimizador"].upper()}).')
+            result, x = self.motor.formular(cows, temperature, pen.housing_type,
+                                            None if previous is None else previous['x'])
             attempts.append(dict(leite_medio=milk, sucesso=result['sucesso'],
                                  status=result.get('status'), mensagem=result.get('mensagem')))
             if result['sucesso']:
@@ -312,7 +420,7 @@ class Acoplamento:
             self.dietas[pen.id] = dict(x=x, racao=ration, custo=result['custo_total_dia'])
             event.update(sucesso=True, dieta=result['ingredientes'], custo_vaca_dia=result['custo_total_dia'],
                          consumo_ms=result['consumo_total_ms'], restricoes=result['restricoes'],
-                         exigencias=result['diagnosticos']['exigencias'], iteracoes=result['iteracoes'],
+                         exigencias=result['exigencias'], iteracoes=result['iteracoes'],
                          tempo_segundos=result['tempo_segundos'])
         elif previous is not None:
             ration = dict(previous['racao'])
@@ -344,14 +452,13 @@ class Acoplamento:
             diet = self.dietas[pen.id]
             cost += diet['custo'] * len(pen.animals_in_pen)
             if self.s['conferencia_diaria']:
-                cows = _vacas(pen)
-                f = PenFormulator(_cenario_baia(self.s, cows, temperature), cows, temperature, pen.housing_type)
-                residual, checks, _, _, _ = f.evaluate(diet['x'], 0)
+                checks = self.motor.conferir(_vacas(pen), temperature, pen.housing_type, diet['x'])
+                residual = [c['folga'] / c['escala'] for c in checks]
                 worst = min(range(len(residual)), key=lambda i: residual[i])
                 if check is not None and check['menor_residuo'] <= residual[worst]:
                     continue  # com mais de uma baia de lactação, registra a pior
                 check = dict(menor_residuo=float(residual[worst]), restricao=checks[worst]['nome'],
-                             atende=bool(min(residual) >= -solver.TOLERANCE),
+                             atende=all(c['atendida'] for c in checks),
                              falhas=[dict(nome=c['nome'], folga=c['folga'], unidade=c['unidade'])
                                      for c in checks if not c['atendida']])
         lac = sum(len(p.animals_in_pen) for p in herd.all_pens if p.animal_combination is AnimalCombination.LAC_COW)
@@ -396,7 +503,8 @@ def resumo(state):
     milk = sum(d['leite_rebanho'] for d in days)
     cost = sum(d['custo_rebanho'] for d in days)
     checked = [d for d in days if d['conferencia']]
-    return dict(dias_simulados=len(days), leite_total_kg=milk, custo_total=cost,
+    return dict(otimizador=OTIMIZADORES[s['otimizador']], dias_simulados=len(days), leite_total_kg=milk,
+                custo_total=cost,
                 receita_total=milk * s['preco_leite_kg'], margem_total=milk * s['preco_leite_kg'] - cost,
                 custo_por_kg_leite=cost / milk if milk else None,
                 media_vacas_lactacao=sum(d['vacas_lactacao'] for d in days) / len(days) if days else 0,
@@ -408,16 +516,23 @@ def resumo(state):
 
 
 def avisos(s):
-    return ['Rebanho, curva de lactação, reprodução, descarte e clima vêm do exemplo animals_only do RuFaS '
-            '(rebanho de 100 vacas, clima de exemplo a partir de 01/01/2013).',
-            'Somente a baia de vacas em lactação recebe a dieta do otimizador; as demais baias seguem a ração nativa.',
-            'O leite é o da simulação: no RuFaS a dieta não aumenta a produção; quando não há dieta viável, o leite '
-            'é cortado em 0,25 kg por vaca até o máximo configurado, como no fluxo nativo.',
-            'A dieta é formulada para as vacas presentes no dia da reformulação e mantida até a próxima; a conferência '
-            'diária mostra os dias em que a média da baia deixou de ser atendida.',
-            'O premix fixo entra no custo e no otimizador, mas não é passado ao RuFaS, '
-            'por não ter código na biblioteca de alimentos.',
-            'Estoques não são aplicados neste modo; os limites por alimento e o teto de caroço são aplicados.']
+    pulp_notes = [] if s['otimizador'] != 'pulp' else [
+        'Otimizador PuLP: modelo NASEM próprio (modelo_pulp.py, mesmas equações de dieta_pulp.py), com a média das '
+        'exigências das vacas da baia; consumo entre ±{:.0%} do previsto pela Eq. 2-1.'.format(s['faixa_consumo']),
+        'PuLP: o ganho de peso-alvo e a variação de reservas de cada vaca vêm das fórmulas de crescimento do RuFaS '
+        '(perda de reservas entra como zero); Tifton 85 usa a composição de "Bermudagrass hay" (código 18), '
+        'como no script.']
+    return pulp_notes + [
+        'Rebanho, curva de lactação, reprodução, descarte e clima vêm do exemplo animals_only do RuFaS '
+        '(rebanho de 100 vacas, clima de exemplo a partir de 01/01/2013).',
+        'Somente a baia de vacas em lactação recebe a dieta do otimizador; as demais baias seguem a ração nativa.',
+        'O leite é o da simulação: no RuFaS a dieta não aumenta a produção; quando não há dieta viável, o leite '
+        'é cortado em 0,25 kg por vaca até o máximo configurado, como no fluxo nativo.',
+        'A dieta é formulada para as vacas presentes no dia da reformulação e mantida até a próxima; a conferência '
+        'diária mostra os dias em que a média da baia deixou de ser atendida.',
+        'O premix fixo entra no custo e no otimizador, mas não é passado ao RuFaS, '
+        'por não ter código na biblioteca de alimentos.',
+        'Estoques não são aplicados neste modo; os limites por alimento e o teto de caroço são aplicados.']
 
 
 def simular_acoplado(scenario, progress=None):
@@ -439,7 +554,8 @@ def simular_acoplado(scenario, progress=None):
                                 metadata_depth_limit=None)
     finally:
         os.chdir(cwd)
-    base = dict(modo='acoplado', padrao=s['padrao'], motor='RuFaS (simulação animals_only) + otimizador SciPy/SLSQP',
+    base = dict(modo='acoplado', padrao=s['padrao'], otimizador=s['otimizador'],
+                motor='RuFaS (simulação animals_only) + ' + OTIMIZADORES[s['otimizador']],
                 cenario=s, pasta=str(folder), inicio=START.isoformat(), reformulacoes=state.reformulacoes,
                 diario=state.diario, tempo_segundos=time.monotonic() - state.inicio, avisos=avisos(s),
                 proveniencia=dict(modelo=MODEL, entradas=[METADATA, CONFIG, ANIMAL, FEED, TASK]))
@@ -462,15 +578,19 @@ def main():
     parser.add_argument('--dias', type=int, default=90)
     parser.add_argument('--intervalo', type=int, default=30)
     parser.add_argument('--semente', type=int, default=42)
+    parser.add_argument('--otimizador', choices=list(OTIMIZADORES), default=None,
+                        help='pulp (padrão no NASEM) ou slsqp (padrão no NRC)')
     parser.add_argument('--sem-conferencia', action='store_true', help='não confere a dieta todos os dias')
     args = parser.parse_args()
     result = simular_acoplado(dict(padrao=args.padrao, dias_simulacao=args.dias, intervalo_dieta=args.intervalo,
-                                   semente=args.semente, conferencia_diaria=not args.sem_conferencia),
+                                   semente=args.semente, conferencia_diaria=not args.sem_conferencia,
+                                   otimizador=args.otimizador),
                               progress=lambda m: print(m, file=sys.stderr, flush=True))
     if not result['sucesso']:
         print(json.dumps({k: result[k] for k in ('status', 'mensagem')}, ensure_ascii=False, indent=2))
         sys.exit(1)
     r = result['resumo']
+    print(r['otimizador'])
     print(f"Dias: {r['dias_simulados']} | reformulações: {r['reformulacoes']} | "
           f"leite: {r['leite_total_kg']:.0f} kg | custo: R$ {r['custo_total']:.2f} | "
           f"R$ {r['custo_por_kg_leite']:.3f}/kg de leite")

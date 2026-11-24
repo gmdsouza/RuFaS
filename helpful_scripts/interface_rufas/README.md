@@ -136,7 +136,8 @@ componentes são rejeitados explicitamente. Sem declaração, Ca/P do premix sã
 - `interface/app.js`: cenário, tabela de alimentos, fila, cancelamento e resultados.
 - `test_rufas.py`: integração com módulos e dados reais, dois padrões, horizonte, preços, estoques e exclusões.
 - `rufas_acoplado.py`: modo acoplado, com o otimizador chamado dentro da simulação do RuFaS.
-- `test_acoplado.py`: regressões do modo acoplado.
+- `test_acoplado.py`: regressões do modo acoplado (os dois otimizadores).
+- `../nasem2021_dieta_lp/modelo_pulp.py` e `test_modelo_pulp.py`: modelo PuLP em funções e sua equivalência com `dieta_pulp.py`.
 
 GET `/api/rufas/perfil`; GET `/api/rufas/alimentos?padrao=NRC|NASEM`;
 POST `/api/rufas/jobs`; GET `/api/rufas/jobs/<id>`;
@@ -167,11 +168,10 @@ Arquivo: `rufas_acoplado.py`. Identificador: `rufas-acoplado-simulacao-v1`.
    população de exemplo, reprodução, curva de lactação, secagem, descarte e clima.
 2. O RuFaS reformula as rações no dia 1 e depois a cada `intervalo_dieta` dias
    (`formulation_interval`). Nesses dias, a baia de vacas em lactação não usa a
-   formulação nativa: recebe a dieta de custo mínimo do otimizador da interface.
-3. O otimizador usa as exigências **médias das vacas que estão na baia naquele dia**.
-   Elas são calculadas vaca a vaca, com peso, DEL, gestação, ordem de parto e leite
-   gerados pela simulação, e recalculadas para a FDN/energia de cada dieta testada,
-   como no modo de planejamento.
+   formulação nativa: recebe a dieta de custo mínimo do otimizador escolhido.
+3. O otimizador usa as exigências **médias das vacas que estão na baia naquele dia**,
+   calculadas vaca a vaca com peso, DEL, gestação, ordem de parto e leite gerados
+   pela simulação.
 4. A dieta vira a ração da baia no RuFaS (`pen.ration`, kg MS/vaca/dia), e a
    simulação segue com ela até a próxima reformulação. As outras baias (bezerras,
    novilhas e pré-parto) continuam com a formulação nativa.
@@ -186,6 +186,28 @@ alterado: as entradas da rodada são cópias gravadas em
 `output/acoplado/<rodada>/entradas/`, com o horizonte, o padrão, o intervalo e a
 lista de alimentos da baia de lactação.
 
+### Otimizadores
+
+| `otimizador` | Modelo | Padrão | Como resolve |
+| --- | --- | --- | --- |
+| `pulp` (padrão no NASEM) | Modelo NASEM próprio: `helpful_scripts/nasem2021_dieta_lp/modelo_pulp.py`, mesmas equações e restrições de `dieta_pulp.py` | Só NASEM | Rodadas de LP com PuLP/CBC, até a dieta suposta e a medida coincidirem |
+| `slsqp` (padrão no NRC) | Exigências e restrições nativas do RuFaS, as mesmas do modo de planejamento | NRC ou NASEM | `linprog` para o ponto inicial e SciPy/SLSQP |
+
+**PuLP dentro da simulação:**
+
+- Cada vaca da baia vira uma `Vaca` do modelo: peso, peso adulto, DEL, gestação (vazia = sem termos de
+  gestação), leite do dia, gordura/proteína/lactose do RuFaS, escore e multípara (2ª lactação ou mais).
+- Ganho de peso e reservas: o ganho-alvo e a variação de reservas de cada vaca são calculados pelas fórmulas de
+  crescimento do RuFaS. O ganho total que o RuFaS guarda inclui o feto, que o modelo PuLP já conta à parte.
+  Perda de reservas entra como zero.
+- Exigências: média das exigências das vacas (`exigencias_media`).
+- Consumo: entre ±30% do previsto pela Eq. 2-1 para a média da baia, a mesma faixa que o RuFaS usa
+  (`faixa_consumo`, ajustável pela API).
+- Alimentos: os do script, com Tifton 85 na composição de "Bermudagrass hay" (código 18), que é o código passado
+  ao RuFaS. Preços próprios, alimentos bloqueados, teto de caroço e teto de custo são aplicados.
+- Conferência diária: `avaliar`, com as mesmas restrições usadas para formular.
+- Requer `pulp==2.9.0` no Python do servidor: `.venv-rufas/bin/python -m pip install pulp==2.9.0`.
+
 ### Regras
 
 - **Leite:** é o da simulação. No RuFaS, a dieta não aumenta a produção. No dia 1,
@@ -199,9 +221,11 @@ lista de alimentos da baia de lactação.
 - **Custo do dia:** custo da dieta por vaca (com o premix) × vacas na baia de
   lactação naquele dia.
 - **Conferência diária:** todos os dias, a dieta em uso é comparada com a
-  exigência média das vacas que estão na baia naquele dia. Como as vacas e o leite
-  mudam de um dia para o outro, aparecem faltas pequenas entre as reformulações; a
-  tabela mostra cada falta na unidade da restrição.
+  exigência média das vacas que estão na baia naquele dia, com as restrições do
+  próprio otimizador (não é preciso resolver nada: a oferta da dieta fixa é
+  calculada e comparada). Como as vacas e o leite mudam de um dia para o outro,
+  aparecem faltas pequenas entre as reformulações; a tabela mostra cada falta na
+  unidade da restrição.
 - **NRC:** as rações de exemplo das outras baias usam duas misturas que só
   existem na biblioteca NASEM. Na cópia de entrada, a mistura mineral (301) vira
   calcário + fosfato bicálcico e a mistura de subprodutos (302) vira farelo de
@@ -212,6 +236,8 @@ lista de alimentos da baia de lactação.
 | Campo | Padrão | Descrição |
 | --- | --- | --- |
 | `padrao` | `NASEM` | `NASEM` ou `NRC`. |
+| `otimizador` | `pulp` no NASEM, `slsqp` no NRC | `pulp` ou `slsqp` (ver Otimizadores). |
+| `faixa_consumo` | 0,30 | Só no `pulp`: consumo entre ±fração do previsto pela Eq. 2-1. |
 | `dias_simulacao` | 90 | Dias simulados, de 1 a 730, a partir de 01/01/2013 (o clima de exemplo cobre 2013–2019). |
 | `intervalo_dieta` | 30 | De quantos em quantos dias o RuFaS reformula e chama o otimizador (1 a 60). |
 | `preco_leite_kg` | 2,75 | R$/kg, só para a receita e a margem. |
@@ -247,16 +273,18 @@ tarefa. O resultado também é gravado em `output/estudo_dieta/acoplado_<id>.jso
 Pela linha de comando, na raiz do clone:
 
 ```bash
-env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl .venv-rufas/bin/python helpful_scripts/interface_rufas/rufas_acoplado.py --padrao NASEM --dias 365 --intervalo 30
+env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl .venv-rufas/bin/python helpful_scripts/interface_rufas/rufas_acoplado.py --padrao NASEM --dias 365 --intervalo 30 --otimizador pulp
 ```
 
-Tempo de referência: 365 dias com reformulação a cada 15 dias, cerca de 20 s.
+Tempo de referência: 120 dias com reformulação a cada 30 dias, cerca de 15 s (PuLP) e 9 s (SLSQP).
 
 Testes:
 
 ```bash
 cd helpful_scripts/interface_rufas
 env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl ../../.venv-rufas/bin/python -m unittest test_acoplado -v
+cd ../nasem2021_dieta_lp
+../../.venv-rufas/bin/python -m unittest test_modelo_pulp -v
 ```
 
 ### Limitações
@@ -268,8 +296,10 @@ env -u DISPLAY MPLCONFIGDIR=/tmp/rufas-mpl ../../.venv-rufas/bin/python -m unitt
 - O premix fixo entra no custo e no otimizador, mas não é passado ao RuFaS, porque
   não tem código na biblioteca de alimentos.
 - Estoques não são controlados neste modo.
-- Os tetos operacionais (PB 19%, Ca 1%, P 0,42%) e o adaptador NASEM para vaca
-  não gestante são os mesmos do modo de planejamento.
+- `slsqp`: os tetos operacionais (PB 19%, Ca 1%, P 0,42%) e o adaptador NASEM para
+  vaca não gestante são os mesmos do modo de planejamento.
+- `pulp`: valem as limitações do modelo próprio (README de `nasem2021_dieta_lp`).
+  As exigências são as do modelo PuLP, não as nativas do RuFaS.
 
 ## Correção v4.1: não gestante antes de DEL 100
 
